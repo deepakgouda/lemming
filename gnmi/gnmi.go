@@ -256,6 +256,7 @@ func checkWritePermission(auth PathAuth, user string, nos ...*gpb.Notification) 
 
 // updateCacheNotifs updates the cache with the given notifications.
 func updateCacheNotifs(c *Collector, nos []*gpb.Notification, origin string) error {
+	var deletes, updates []*gpb.Notification
 	for _, n := range nos {
 		if n.Prefix == nil {
 			n.Prefix = &gpb.Path{}
@@ -264,7 +265,23 @@ func updateCacheNotifs(c *Collector, nos []*gpb.Notification, origin string) err
 		if n.Prefix.Origin == "" {
 			n.Prefix.Origin = OpenConfigOrigin
 		}
+		if len(n.Delete) > 0 {
+			deletes = append(deletes, &gpb.Notification{
+				Timestamp: n.Timestamp,
+				Prefix:    n.Prefix,
+				Delete:    n.Delete,
+			})
+		}
+		if len(n.Update) > 0 {
+			updates = append(updates, &gpb.Notification{
+				Timestamp: n.Timestamp,
+				Prefix:    n.Prefix,
+				Update:    n.Update,
+			})
+		}
+	}
 
+	for _, n := range deletes {
 		var pathsForDelete []string
 		for _, path := range n.Delete {
 			p, err := ygot.PathToString(path)
@@ -273,17 +290,27 @@ func updateCacheNotifs(c *Collector, nos []*gpb.Notification, origin string) err
 			}
 			pathsForDelete = append(pathsForDelete, p)
 		}
-		if len(n.Update) > 0 {
-			log.V(3).Infof("datastore: updating the following values: %+v", n.Update)
-		}
 		if len(pathsForDelete) > 0 {
 			log.V(3).Infof("datastore: deleting the following paths: %+v", pathsForDelete)
 		}
-		log.V(3).Infof("datastore: calling GnmiUpdate with the following notification:\n%s", prototext.Format(n))
+		log.V(3).Infof("datastore: calling GnmiUpdate with the following delete notification:\n%s", prototext.Format(n))
 		if err := c.GnmiUpdate(n); err != nil {
 			return fmt.Errorf("%w: notification:\n%s\n%s", err, prototext.Format(n), string(debug.Stack()))
 		}
-		if enableDebugLog && (len(n.Delete) != 0 || len(n.Update) != 0) {
+		if enableDebugLog {
+			logUpdate(n)
+		}
+	}
+	// Process updates next.
+	if len(updates) > 0 {
+		log.V(3).Infof("datastore: updating the following values: %+v", updates)
+	}
+	for _, n := range updates {
+		log.V(3).Infof("datastore: calling GnmiUpdate with the following update notification:\n%s", prototext.Format(n))
+		if err := c.GnmiUpdate(n); err != nil {
+			return fmt.Errorf("%w: notification:\n%s\n%s", err, prototext.Format(n), string(debug.Stack()))
+		}
+		if enableDebugLog {
 			logUpdate(n)
 		}
 	}
