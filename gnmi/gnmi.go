@@ -21,6 +21,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,6 +52,10 @@ const (
 	enableDebugLog = true
 )
 
+const (
+	notificationQueueSize = 100
+)
+
 // Server is a reference gNMI implementation.
 type Server struct {
 	// The subscribe Server implements only Subscribe for gNMI.
@@ -70,6 +75,11 @@ type Server struct {
 	reconcilers []reconciler.Reconciler
 
 	pathAuth PathAuth
+
+	// notificationQueue buffers non-critical notifications to be sent to the client.
+	notificationQueue chan *gpb.Notification
+	// stopQueue is used to signal the queue processing goroutine to stop.
+	stopQueue chan struct{}
 }
 
 // New creates and registers a reference gNMI server on the given gRPC server.
@@ -106,10 +116,15 @@ func newServer(ctx context.Context, targetName string, enableSet bool, recs ...r
 	}
 
 	gnmiServer := &Server{
-		Server:      subscribeSrv, // use the 'subscribe' implementation.
-		c:           c,
-		reconcilers: recs,
+		Server:            subscribeSrv, // use the 'subscribe' implementation.
+		c:                 c,
+		reconcilers:       recs,
+		notificationQueue: make(chan *gpb.Notification, notificationQueueSize),
 	}
+
+	// Start the background worker to process the notification queue.
+	log.V(1).Infof("starting processNotificationQueue coroutine")
+	go gnmiServer.processNotificationQueue()
 
 	if !enableSet {
 		return gnmiServer, nil
@@ -132,7 +147,7 @@ func newServer(ctx context.Context, targetName string, enableSet bool, recs ...r
 		if err := ygot.PruneConfigFalse(configSchema.RootSchema(), configSchema.Root); err != nil {
 			return nil, fmt.Errorf("gnmi: %v", err)
 		}
-		if err := updateCache(c, configSchema.Root, emptySchema.Root, OpenConfigOrigin, true, 0, "", nil); err != nil {
+		if err := gnmiServer.updateCache(c, configSchema.Root, emptySchema.Root, OpenConfigOrigin, true, 0, "", nil); err != nil {
 			return nil, fmt.Errorf("gnmi newServer: %v", err)
 		}
 	}
@@ -145,7 +160,7 @@ func newServer(ctx context.Context, targetName string, enableSet bool, recs ...r
 		if err := setupSchema(stateSchema, false); err != nil {
 			return nil, err
 		}
-		if err := updateCache(c, stateSchema.Root, emptySchema.Root, OpenConfigOrigin, true, 0, "", nil); err != nil {
+		if err := gnmiServer.updateCache(c, stateSchema.Root, emptySchema.Root, OpenConfigOrigin, true, 0, "", nil); err != nil {
 			return nil, fmt.Errorf("gnmi newServer: %v", err)
 		}
 	}
@@ -160,6 +175,27 @@ func newServer(ctx context.Context, targetName string, enableSet bool, recs ...r
 	gnmiServer.stateSchema = stateSchema
 
 	return gnmiServer, nil
+}
+
+// processNotificationQueue is a worker that processes buffered notifications.
+func (s *Server) processNotificationQueue() {
+	log.V(3).Info("Starting gNMI notification queue processor.")
+	for {
+		select {
+		case n := <-s.notificationQueue:
+			log.V(1).Infof("datastore: processing from queue, calling GnmiUpdate with notification:\n%s", prototext.Format(n))
+			if err := s.c.GnmiUpdate(n); err != nil {
+				// Use Errorf to log the error without crashing the service.
+				log.Errorf("Error from queue processing GnmiUpdate: %v: notification:\n%s\n%s", err, prototext.Format(n), string(debug.Stack()))
+			}
+			if enableDebugLog {
+				logUpdate(n)
+			}
+		case <-s.stopQueue:
+			log.V(1).Info("Stopping gNMI notification queue processor.")
+			return
+		}
+	}
 }
 
 type populateDefaultser interface {
@@ -195,7 +231,7 @@ func setupSchema(schema *ytypes.Schema, config bool) error {
 // If root is nil, then it is assumed the cache is empty, and the entirety of
 // the dirtyRoot is put into the cache.
 // - auth adds authorization to before writing vals to the cache, if set to nil, not authorization is checked.
-func updateCache(collector *Collector, dirtyRoot, root ygot.GoStruct, origin string, preferShadowPath bool, timestamp int64, user string, auth PathAuth) error {
+func (s *Server) updateCache(collector *Collector, dirtyRoot, root ygot.GoStruct, origin string, preferShadowPath bool, timestamp int64, user string, auth PathAuth) error {
 	var nos []*gpb.Notification
 	if root == nil {
 		var err error
@@ -225,7 +261,7 @@ func updateCache(collector *Collector, dirtyRoot, root ygot.GoStruct, origin str
 		}
 	}
 
-	return updateCacheNotifs(collector, nos, origin)
+	return s.updateCacheNotifs(collector, nos, origin)
 }
 
 func checkWritePermission(auth PathAuth, user string, nos ...*gpb.Notification) (bool, error) {
@@ -254,9 +290,9 @@ func checkWritePermission(auth PathAuth, user string, nos ...*gpb.Notification) 
 	return true, nil
 }
 
-// updateCacheNotifs updates the cache with the given notifications.
-func updateCacheNotifs(c *Collector, nos []*gpb.Notification, origin string) error {
-	var deletes, updates []*gpb.Notification
+// updateCacheNotifs updates the cache with the given notifications. It sends
+// high-priority notifications (deletes, session-state) directly and queues others.
+func (s *Server) updateCacheNotifs(c *Collector, nos []*gpb.Notification, origin string) error {
 	for _, n := range nos {
 		if n.Prefix == nil {
 			n.Prefix = &gpb.Path{}
@@ -265,53 +301,52 @@ func updateCacheNotifs(c *Collector, nos []*gpb.Notification, origin string) err
 		if n.Prefix.Origin == "" {
 			n.Prefix.Origin = OpenConfigOrigin
 		}
-		if len(n.Delete) > 0 {
-			deletes = append(deletes, &gpb.Notification{
-				Timestamp: n.Timestamp,
-				Prefix:    n.Prefix,
-				Delete:    n.Delete,
-			})
-		}
-		if len(n.Update) > 0 {
-			updates = append(updates, &gpb.Notification{
-				Timestamp: n.Timestamp,
-				Prefix:    n.Prefix,
-				Update:    n.Update,
-			})
-		}
-	}
 
-	for _, n := range deletes {
-		var pathsForDelete []string
-		for _, path := range n.Delete {
-			p, err := ygot.PathToString(path)
-			if err != nil {
-				return fmt.Errorf("cannot convert deleted path to string: %v", err)
+		isPriority := false
+		// Priority 1: Notification contains a delete message.
+		if len(n.Delete) > 0 {
+			isPriority = true
+		}
+
+		// Priority 2: Notification updates a session-state path.
+		if !isPriority {
+			for _, upd := range n.Update {
+				fullPath, err := util.JoinPaths(n.GetPrefix(), upd.GetPath())
+				if err != nil {
+					log.Errorf("Cannot join paths for priority check: %v", err)
+					continue
+				}
+				pathStr, err := ygot.PathToString(fullPath)
+				if err != nil {
+					log.Errorf("Cannot convert path to string for priority check: %v", err)
+					continue
+				}
+				if strings.HasSuffix(pathStr, "/state/session-state") {
+					isPriority = true
+					break // Found a priority update, no need to check further.
+				}
 			}
-			pathsForDelete = append(pathsForDelete, p)
 		}
-		if len(pathsForDelete) > 0 {
-			log.V(3).Infof("datastore: deleting the following paths: %+v", pathsForDelete)
-		}
-		log.V(3).Infof("datastore: calling GnmiUpdate with the following delete notification:\n%s", prototext.Format(n))
-		if err := c.GnmiUpdate(n); err != nil {
-			return fmt.Errorf("%w: notification:\n%s\n%s", err, prototext.Format(n), string(debug.Stack()))
-		}
-		if enableDebugLog {
-			logUpdate(n)
-		}
-	}
-	// Process updates next.
-	if len(updates) > 0 {
-		log.V(3).Infof("datastore: updating the following values: %+v", updates)
-	}
-	for _, n := range updates {
-		log.V(3).Infof("datastore: calling GnmiUpdate with the following update notification:\n%s", prototext.Format(n))
-		if err := c.GnmiUpdate(n); err != nil {
-			return fmt.Errorf("%w: notification:\n%s\n%s", err, prototext.Format(n), string(debug.Stack()))
-		}
-		if enableDebugLog {
-			logUpdate(n)
+
+		if isPriority {
+			// Send priority notifications directly to the collector.
+			log.V(3).Infof("datastore: sending PRIORITY notification directly:\n%s", prototext.Format(n))
+			if err := c.GnmiUpdate(n); err != nil {
+				return fmt.Errorf("%w: notification:\n%s\n%s", err, prototext.Format(n), string(debug.Stack()))
+			}
+			if enableDebugLog {
+				logUpdate(n)
+			}
+		} else {
+			// Queue non-priority notifications.
+			select {
+			case s.notificationQueue <- n:
+				// Message successfully queued.
+				log.V(3).Infof("datastore: queued notification successfully")
+			default:
+				// The queue is full, drop the message to prevent blocking.
+				log.Warningf("gNMI notification queue is full. Dropping notification")
+			}
 		}
 	}
 	return nil
@@ -365,7 +400,7 @@ func unmarshalSetRequest(schema *ytypes.Schema, req *gpb.SetRequest, preferShado
 // - timestamp specifies the timestamp of the values that are to be updated in
 // the gNMI cache. If zero, then time.Now().UnixNano() is used.
 // - auth adds authorization to before writing vals to the cache, if set to nil, not authorization is checked.
-func set(schema *ytypes.Schema, c *Collector, req *gpb.SetRequest, preferShadowPath bool, validators []func(*oc.Root) error, timestamp int64, user string, auth PathAuth) error {
+func (s *Server) set(schema *ytypes.Schema, c *Collector, req *gpb.SetRequest, preferShadowPath bool, validators []func(*oc.Root) error, timestamp int64, user string, auth PathAuth) error {
 	// skip diffing and deepcopy for performance when handling state update paths.
 	// Currently this is not possible for replace/delete paths, since
 	// without doing a diff, it is not possible to compute what was
@@ -388,7 +423,7 @@ func set(schema *ytypes.Schema, c *Collector, req *gpb.SetRequest, preferShadowP
 			return err
 		}
 
-		if err := updateCacheNotifs(c, notifs, req.Prefix.Origin); err != nil {
+		if err := s.updateCacheNotifs(c, notifs, req.Prefix.Origin); err != nil {
 			return err
 		}
 
@@ -429,7 +464,7 @@ func set(schema *ytypes.Schema, c *Collector, req *gpb.SetRequest, preferShadowP
 		}
 	}
 
-	if err := updateCache(c, schema.Root, prevRoot, req.Prefix.Origin, preferShadowPath, timestamp, user, auth); err != nil {
+	if err := s.updateCache(c, schema.Root, prevRoot, req.Prefix.Origin, preferShadowPath, timestamp, user, auth); err != nil {
 		return status.Error(codes.Internal, err.Error())
 	}
 	success = true
@@ -575,7 +610,7 @@ func (s *Server) Set(ctx context.Context, req *gpb.SetRequest) (*gpb.SetResponse
 
 		// TODO(wenbli): Reject paths that try to modify read-only values.
 		// TODO(wenbli): Question: what to do if there are operational-state values in a container that is specified to be replaced or deleted?
-		err := set(s.configSchema, s.c, req, true, s.validators, timestamp, user, s.pathAuth)
+		err := s.set(s.configSchema, s.c, req, true, s.validators, timestamp, user, s.pathAuth)
 
 		// TODO(wenbli): Currently the SetResponse is not filled.
 		return &gpb.SetResponse{
@@ -591,7 +626,7 @@ func (s *Server) Set(ctx context.Context, req *gpb.SetRequest) (*gpb.SetResponse
 		}
 		// TODO(wenbli): Reject values that modify config values. We only allow modifying state in this mode.
 		// Don't authorize setting state since only internal reconcilers do that.
-		if err := set(s.stateSchema, s.c, req, false, nil, timestamp, user, nil); err != nil {
+		if err := s.set(s.stateSchema, s.c, req, false, nil, timestamp, user, nil); err != nil {
 			return &gpb.SetResponse{}, err
 		}
 
