@@ -78,8 +78,8 @@ type Server struct {
 
 	// notificationQueue buffers non-critical notifications to be sent to the client.
 	notificationQueue chan *gpb.Notification
-	// stopQueue is used to signal the queue processing goroutine to stop.
-	stopQueue chan struct{}
+	// cancelQueue is the cancel function for the context controlling the queue processor.
+	cancelQueue context.CancelFunc
 }
 
 // New creates and registers a reference gNMI server on the given gRPC server.
@@ -115,16 +115,19 @@ func newServer(ctx context.Context, targetName string, enableSet bool, recs ...r
 		return nil, err
 	}
 
+	queueCtx, cancel := context.WithCancel(context.Background())
+
 	gnmiServer := &Server{
 		Server:            subscribeSrv, // use the 'subscribe' implementation.
 		c:                 c,
 		reconcilers:       recs,
 		notificationQueue: make(chan *gpb.Notification, notificationQueueSize),
+		cancelQueue:       cancel,
 	}
 
 	// Start the background worker to process the notification queue.
 	log.V(1).Infof("starting processNotificationQueue coroutine")
-	go gnmiServer.processNotificationQueue()
+	go gnmiServer.processNotificationQueue(queueCtx)
 
 	if !enableSet {
 		return gnmiServer, nil
@@ -178,12 +181,12 @@ func newServer(ctx context.Context, targetName string, enableSet bool, recs ...r
 }
 
 // processNotificationQueue is a worker that processes buffered notifications.
-func (s *Server) processNotificationQueue() {
-	log.V(3).Info("Starting gNMI notification queue processor.")
+func (s *Server) processNotificationQueue(ctx context.Context) {
+	log.V(1).Info("Starting gNMI notification queue processor.")
 	for {
 		select {
 		case n := <-s.notificationQueue:
-			log.V(1).Infof("datastore: processing from queue, calling GnmiUpdate with notification:\n%s", prototext.Format(n))
+			log.V(3).Infof("datastore: processing from queue, calling GnmiUpdate with notification:\n%s", prototext.Format(n))
 			if err := s.c.GnmiUpdate(n); err != nil {
 				// Use Errorf to log the error without crashing the service.
 				log.Errorf("Error from queue processing GnmiUpdate: %v: notification:\n%s\n%s", err, prototext.Format(n), string(debug.Stack()))
@@ -191,7 +194,7 @@ func (s *Server) processNotificationQueue() {
 			if enableDebugLog {
 				logUpdate(n)
 			}
-		case <-s.stopQueue:
+		case <-ctx.Done():
 			log.V(1).Info("Stopping gNMI notification queue processor.")
 			return
 		}
@@ -835,4 +838,11 @@ func (s *Server) StopReconcilers(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// Stop gracefully shuts down the gNMI server's background processes.
+func (s *Server) Stop(ctx context.Context) error {
+	log.V(1).Info("Stopping gNMI server components.")
+	s.cancelQueue() // Signal the queue processor to stop.
+	return s.StopReconcilers(ctx)
 }
