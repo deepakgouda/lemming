@@ -1,0 +1,88 @@
+module openconfig-bgp-rib-streaming {
+
+  yang-version "1";
+
+  // namespace
+  namespace "http://openconfig.net/yang/bgp-rib-streaming";
+
+  prefix "oc-bgp-rib-streaming";
+
+  import openconfig-extensions { prefix oc-ext; }
+  import openconfig-inet-types { prefix oc-inet; }
+
+  // meta
+  organization "OpenConfig working group";
+
+  contact
+    "OpenConfig working group
+    www.openconfig.net";
+
+  description
+    "This module defines the paths used for BGP RIB streaming.
+
+    NOTE: This is a DRAFT work in progress for demonstrating RIB 
+    streaming via gNMI.";
+
+  oc-ext:openconfig-version "0.1.0";
+
+  revision "2025-08-18" {
+    description
+      "Initial revision";
+    reference "0.1.0";
+  }
+
+  // OpenConfig specific extensions for module metadata.
+  oc-ext:catalog-organization "openconfig";
+  oc-ext:origin "openconfig";
+
+  // grouping statements
+
+  grouping bgp-rib-streaming-ipv4 {
+    description
+      "Config data for IPv4 BGP RIB streaming";
+
+    uses oc-bgp:bgp-top {
+      when "./config/identifier = 'oc-pol-types:BGP'" {
+        description
+          "Include BGP parameters only when the protocol
+          is of type BGP";
+      }
+      description
+        "Configuration and state parameters relating to
+        Border Gateway Protocol (BGP)";
+    }
+
+    leaf prefix {
+      type oc-inet:ipv4-prefix;
+      description
+        "Prefix containing BGP path's next-hop attribute of NLRI to which GUE
+        global policy applies.
+
+        In case of overlapping prefixes, the global policy with the
+        longest-matching prefix will apply.";
+    }
+
+    leaf dst-port-ipv4 {
+      type oc-inet:port-number;
+      description
+        "Destination port of UDP encap for an IPv4 payload.";
+    }
+
+    leaf dst-port-ipv6 {
+      type oc-inet:port-number;
+      description
+        "Destination port of UDP encap for an IPv6 payload.";
+    }
+
+    leaf src-ip {
+      type oc-inet:ipv4-address;
+      description
+        "Source IP address of IPv4 encap.";
+    }
+  }
+
+  // data definition statements
+  // uses bgp-gue-top;
+
+  // augment statements
+}
