@@ -5,11 +5,14 @@ module openconfig-bgp-rib-streaming {
   // namespace
   namespace "http://openconfig.net/yang/bgp-rib-streaming";
 
-  prefix "oc-bgp-rib-streaming";
+  prefix "oc-bgp-rib-stream";
 
   import openconfig-extensions { prefix oc-ext; }
+  import openconfig-network-instance { prefix oc-netinst; }
+  import openconfig-bgp { prefix oc-bgp; }
   import openconfig-rib-bgp { prefix oc-rib-bgp; }
 
+  // include openconfig-rib-bgp-tables;
 
   // meta
   organization "OpenConfig working group";
@@ -19,12 +22,25 @@ module openconfig-bgp-rib-streaming {
     www.openconfig.net";
 
   description
-    "This module defines the paths used for BGP RIB streaming.
+    "This module defines a data model containing a set of paths used for
+     BGP RIB and session state telemetry streaming. It composes pre-existing
+     paths from other OpenConfig modules into a single logical bundle.
 
-    NOTE: This is a DRAFT work in progress for demonstrating RIB 
-    streaming via gNMI.";
+     This version corrects a leafref resolution error by ensuring that all
+     required containers (e.g., attr-sets and afi-safis) are present within
+     the correct hierarchy.
 
-  oc-ext:openconfig-version "0.1.0";
+     NOTE: This is a DRAFT work in progress for demonstrating RIB
+     streaming via gNMI.";
+
+  oc-ext:openconfig-version "0.1.2";
+
+  revision "2025-08-19" {
+    description
+      "Corrected leafref path resolution error by rebuilding the
+       expected data tree hierarchy.";
+    reference "0.1.2";
+  }
 
   revision "2025-08-18" {
     description
@@ -32,16 +48,24 @@ module openconfig-bgp-rib-streaming {
     reference "0.1.0";
   }
 
-  container ipv4-unicast-loc-rib {
-    config false;
-    description "BGP IPv4 Unicast Local RIB routes.";
-    uses oc-rib-bgp:bgp-rib-top;
-  }
+  augment "/oc-netinst:network-instances/oc-netinst:network-instance/" + 
+    "oc-netinst:protocols/oc-netinst:protocol/oc-bgp:bgp/oc-bgp:rib" {
+    description "Add detailed BGP RIB structures for streaming.";
 
-  // data definition statements
-  // uses oc-rib-bgp:attribute-sets-top;
-  // uses oc-rib-bgp:community-sets-top;
-  // uses oc-rib-bgp:ext-community-sets-top;
-  // uses oc-rib-bgp:ipv4-loc-rib-top;
-  // uses oc-rib-bgp:ipv4-adj-rib-top;
+    container streaming-custom {
+      description
+      "BGP RIB Streaming description";
+      
+      // Create a path which acts as a bundle for the following paths:
+      uses oc-rib-bgp:attribute-sets-top;
+      uses oc-rib-bgp:community-sets-top;
+      uses oc-rib-bgp:ext-community-sets-top;
+      
+      // Currently the subscriptions are handled on the gNMI server side
+      // uses oc-rib-bgp:afi-safis-type;
+      // uses oc-rib-bgp:ipv4-loc-rib-top;
+      // uses oc-rib-bgp:ipv4-unicastbgp-rib-top;
+    }
+
+  }
 }
