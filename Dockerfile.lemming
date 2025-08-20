@@ -11,6 +11,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build go build -o /out/lemming ./c
 RUN  go-licenses save ./cmd/lemming --save_path THIRD_PARTY_LICENSES
 
 FROM build as debug-build
+RUN apt-get update && apt-get install -y libpcap-dev ca-certificates
 RUN go install github.com/go-delve/delve/cmd/dlv@latest
 RUN --mount=type=cache,target=/root/.cache/go-build go build -gcflags='all=-N -l' -o /out/lemming ./cmd/lemming
 
