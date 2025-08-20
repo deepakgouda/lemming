@@ -727,12 +727,53 @@ func (s *subscribeWithAuth) Send(resp *gpb.SubscribeResponse) error {
 	return s.GNMI_SubscribeServer.Send(authResp)
 }
 
+// firstSubReqSrv is a wrapper around a gNMI subscribe server that allows
+// intercepting the first SubscribeRequest.
+type firstSubReqSrv struct {
+	gpb.GNMI_SubscribeServer
+	firstReq *gpb.SubscribeRequest
+	mu       sync.Mutex
+}
+
+// Recv returns the first SubscribeRequest on the first call, and subsequent
+// calls are passed to the underlying server.
+func (s *firstSubReqSrv) Recv() (*gpb.SubscribeRequest, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.firstReq != nil {
+		req := s.firstReq
+		s.firstReq = nil
+		return req, nil
+	}
+	return s.GNMI_SubscribeServer.Recv()
+}
+
 // Subscribe wraps the internal subscribe with optional authorization.
 func (s *Server) Subscribe(srv gpb.GNMI_SubscribeServer) error {
+	req, err := srv.Recv()
+	if err != nil {
+		return err
+	}
+
+	if sub := req.GetSubscribe(); sub != nil {
+		for _, subscription := range sub.GetSubscription() {
+			path, err := ygot.PathToString(subscription.GetPath())
+			if err != nil {
+				log.V(1).Infof("could not convert path to string: %v", err)
+				continue
+			}
+			log.V(1).Infof("client subscribed to path: %q", path)
+		}
+	}
+
+	wrappedSrv := &firstSubReqSrv{
+		GNMI_SubscribeServer: srv,
+		firstReq:             req,
+	}
 	p, ok := peer.FromContext(srv.Context())
 
 	if s.pathAuth == nil || !s.pathAuth.IsInitialized() || !ok || p.Addr == nil { // Addr is nil for calls from the reconcilers.
-		return s.Server.Subscribe(srv)
+		return s.Server.Subscribe(wrappedSrv)
 	}
 	md, _ := metadata.FromIncomingContext(srv.Context()) // Metadata exists even if not explicitly set by client.
 	// TODO: Authentication, for now just looking at the username field.
@@ -741,7 +782,7 @@ func (s *Server) Subscribe(srv gpb.GNMI_SubscribeServer) error {
 		return status.Errorf(codes.Unauthenticated, "no username set in metadata %v", user)
 	}
 	sa := &subscribeWithAuth{
-		GNMI_SubscribeServer: srv,
+		GNMI_SubscribeServer: wrappedSrv,
 		auth:                 s.pathAuth,
 		user:                 user[0],
 	}
