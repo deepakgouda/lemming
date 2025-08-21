@@ -21,6 +21,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -295,6 +296,7 @@ func logUpdate(n *gpb.Notification) {
 	if err != nil {
 		return
 	}
+	log.Infof("~~~~~~~~~~~~~~Processing %d Updates, %d Deletes~~~~~~~~~~~~~~", len(n.Update), len(n.Delete))
 	for _, d := range n.Delete {
 		path, err := ygot.PathToString(d)
 		if err != nil {
@@ -748,6 +750,45 @@ func (s *firstSubReqSrv) Recv() (*gpb.SubscribeRequest, error) {
 	return s.GNMI_SubscribeServer.Recv()
 }
 
+// sendBGPPeers sends the list of BGP peers to the client.
+func sendBGPPeers(srv gpb.GNMI_SubscribeServer, client gpb.GNMIClient, target string) error {
+	path := &gpb.Path{
+		// Origin: "openconfig",
+		Elem: []*gpb.PathElem{
+			{Name: "network-instances"},
+			{Name: "network-instance", Key: map[string]string{"name": "default"}},
+			{Name: "protocols"},
+			{Name: "protocol", Key: map[string]string{"identifier": "BGP", "name": "BGP"}},
+			{Name: "bgp"},
+			{Name: "neighbors"},
+		},
+	}
+	req := &gpb.GetRequest{
+		// Prefix:   &gpb.Path{Target: target},
+		Prefix:   &gpb.Path{Origin: "openconfig", Target: target},
+		Path:     []*gpb.Path{path},
+		Type:     gpb.GetRequest_STATE,
+		Encoding: gpb.Encoding_PROTO,
+	}
+
+	resp, err := client.Get(srv.Context(), req)
+	if err != nil {
+		return fmt.Errorf("failed to get bgp peers: %v", err)
+	}
+
+	for _, notif := range resp.GetNotification() {
+		subResp := &gpb.SubscribeResponse{
+			Response: &gpb.SubscribeResponse_Update{
+				Update: notif,
+			},
+		}
+		if err := srv.Send(subResp); err != nil {
+			return fmt.Errorf("failed to send bgp peer notification: %v", err)
+		}
+	}
+	return nil
+}
+
 // Subscribe wraps the internal subscribe with optional authorization.
 func (s *Server) Subscribe(srv gpb.GNMI_SubscribeServer) error {
 	req, err := srv.Recv()
@@ -763,6 +804,12 @@ func (s *Server) Subscribe(srv gpb.GNMI_SubscribeServer) error {
 				continue
 			}
 			log.V(1).Infof("client subscribed to path: %q", path)
+			if strings.HasSuffix(path, "unicast/loc-rib") {
+				log.V(1).Info("~~~~~~~~~~~~~~~Sending full BGP peer list ~~~~~~~~~~~~~~~")
+				if err := sendBGPPeers(srv, s.LocalClient(), s.c.name); err != nil {
+					log.Errorf("failed to send BGP peers: %v", err)
+				}
+			}
 		}
 	}
 
@@ -792,6 +839,7 @@ func (s *Server) Subscribe(srv gpb.GNMI_SubscribeServer) error {
 
 // LocalClient returns a gNMI client for the server.
 func (s *Server) LocalClient() gpb.GNMIClient {
+	log.Infof("~~~~~~~~~~~~~~~~Here~~~~~~~~~~~~~~~~")
 	return newLocalClient(s)
 }
 
