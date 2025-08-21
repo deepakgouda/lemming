@@ -751,7 +751,7 @@ func (s *firstSubReqSrv) Recv() (*gpb.SubscribeRequest, error) {
 }
 
 // sendBGPPeers sends the list of BGP peers to the client.
-func sendBGPPeers(srv gpb.GNMI_SubscribeServer, client gpb.GNMIClient, target string) error {
+func (s *Server) sendBGPPeers(srv gpb.GNMI_SubscribeServer) error {
 	path := &gpb.Path{
 		// Origin: "openconfig",
 		Elem: []*gpb.PathElem{
@@ -765,13 +765,13 @@ func sendBGPPeers(srv gpb.GNMI_SubscribeServer, client gpb.GNMIClient, target st
 	}
 	req := &gpb.GetRequest{
 		// Prefix:   &gpb.Path{Target: target},
-		Prefix:   &gpb.Path{Origin: "openconfig", Target: target},
+		Prefix:   &gpb.Path{Origin: "openconfig", Target: s.c.name},
 		Path:     []*gpb.Path{path},
 		Type:     gpb.GetRequest_STATE,
 		Encoding: gpb.Encoding_PROTO,
 	}
 
-	resp, err := client.Get(srv.Context(), req)
+	resp, err := s.Get(srv.Context(), req)
 	if err != nil {
 		return fmt.Errorf("failed to get bgp peers: %v", err)
 	}
@@ -806,7 +806,7 @@ func (s *Server) Subscribe(srv gpb.GNMI_SubscribeServer) error {
 			log.V(1).Infof("client subscribed to path: %q", path)
 			if strings.HasSuffix(path, "unicast/loc-rib") {
 				log.V(1).Info("~~~~~~~~~~~~~~~Sending full BGP peer list ~~~~~~~~~~~~~~~")
-				if err := sendBGPPeers(srv, s.LocalClient(), s.c.name); err != nil {
+				if err := s.sendBGPPeers(srv); err != nil {
 					log.Errorf("failed to send BGP peers: %v", err)
 				}
 			}
