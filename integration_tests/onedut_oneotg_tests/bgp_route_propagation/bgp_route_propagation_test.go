@@ -531,6 +531,20 @@ func TestBGP(t *testing.T) {
 			t.Logf("Verify OTG BGP sessions up")
 			verifyOTGBGPTelemetry(t, otg, otgConfig, "ESTABLISHED")
 
+			// Assume we have the OC path for RIB streaming. Here we are using
+			// IPv4-Unicast loc-rib path
+			t.Logf("~~~~~~~~~~Subscribing to custom RIB path~~~~~~~~~~")
+			ribPath := ocpath.Root().NetworkInstance(fakedevice.DefaultNetworkInstance).
+				Protocol(oc.PolicyTypes_INSTALL_PROTOCOL_TYPE_BGP, "BGP").Bgp().Rib()
+			locRibQuery := ribPath.AfiSafi(oc.BgpTypes_AFI_SAFI_TYPE_IPV4_UNICAST).Ipv4Unicast().LocRib().State()
+			if _, ok := gnmi.Watch(t, dut, locRibQuery, time.Second*30, func(val *ygnmi.Value[*oc.NetworkInstance_Protocol_Bgp_Rib_AfiSafi_Ipv4Unicast_LocRib]) bool {
+				t.Logf("~~~~~~~~~~Found value: %+v~~~~~~~~~~", val)
+				t.Logf("~~~~~~~~~~Successfully subscribed to custom RIB path.~~~~~~~~~~")
+				return val.IsPresent()
+			}).Await(t); !ok {
+				t.Fatalf("~~~~~~~~~~loc-rib is not present after 30 seconds~~~~~~~~~~")
+			}
+
 			for _, prefix := range tc.wantPrefixes {
 				var expectedOTGBGPPrefix OTGBGPPrefix
 				if prefix.v4 != "" {
