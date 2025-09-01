@@ -442,6 +442,32 @@ func TestBGP(t *testing.T) {
 				}
 			}
 
+			// Subscribe to adj-rib-in-pre for each neighbor
+			for neighborAddr := range tc.dut.bgpOC.Neighbor {
+				t.Logf("~~~~~~~~~~Subscribing to adj-rib-in-pre for neighbor %s~~~~~~~~~~", neighborAddr)
+				adjRibInPreQuery := bgpPath.Rib().AfiSafi(oc.BgpTypes_AFI_SAFI_TYPE_IPV4_UNICAST).Ipv4Unicast().Neighbor(neighborAddr).AdjRibInPre().RouteAny().State()
+
+				// Watch for any route to appear in adj-rib-in-pre
+				_, ok := gnmi.WatchAll(t, dut, adjRibInPreQuery, time.Second*30, func(val *ygnmi.Value[*oc.NetworkInstance_Protocol_Bgp_Rib_AfiSafi_Ipv4Unicast_Neighbor_AdjRibInPre_Route]) bool {
+					if val.IsPresent() {
+						route, _ := val.Val()
+						t.Logf("~~~~~~adj-rib-in-pre route for neighbor %s: %+v~~~~~~", neighborAddr, route)
+					}
+					return val.IsPresent()
+				}).Await(t)
+
+				if !ok {
+					t.Logf("~~~~~~No adj-rib-in-pre routes found for neighbor %s within timeout~~~~~~", neighborAddr)
+				} else {
+					// Once a route is seen, get all routes currently in the RIB for this neighbor
+					adjRibInPreRoutes := gnmi.GetAll(t, dut, adjRibInPreQuery)
+					t.Logf("~~~~~~All adj-rib-in-pre routes for neighbor %s: %+v~~~~~~", neighborAddr, adjRibInPreRoutes)
+					for i, route := range adjRibInPreRoutes {
+						t.Logf("  Route %d: Prefix: %s, PathId: %d, ValidRoute: %v, AttrIndex: %d", i, route.GetPrefix(), route.GetPathId(), route.GetValidRoute(), route.GetAttrIndex())
+					}
+				}
+			}
+
 			for _, prefix := range tc.wantPrefixes {
 				var expectedOTGBGPPrefix OTGBGPPrefix
 				if prefix.v4 != "" {
