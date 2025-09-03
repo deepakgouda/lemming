@@ -52,7 +52,7 @@ module openconfig-bgp-rib-streaming {
     "oc-netinst:protocols/oc-netinst:protocol/oc-bgp:bgp/oc-bgp:rib" {
     description "Add detailed BGP RIB structures for streaming.";
 
-    container streaming-custom {
+    container streaming {
       description
       "BGP RIB Streaming description";
       
